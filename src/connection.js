@@ -32,10 +32,10 @@ let targetInfo = null;
 // multiple consumers via Streamable HTTP, where the mutex covers all
 // callers.
 const writeMutex = new Mutex();
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
-const MAX_RETRIES = 5;
-const BASE_DELAY = 500;
+const CDP_HOST = process.env.CDP_HOST || 'localhost';
+const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
+const MAX_RETRIES = parseInt(process.env.CDP_MAX_RETRIES || '5', 10);
+const BASE_DELAY = parseInt(process.env.CDP_BASE_DELAY_MS || '500', 10);
 
 // CDP connection lifecycle state.
 //
@@ -107,7 +107,9 @@ export async function getClient() {
 
 export async function connect() {
   let lastError;
+  const t0 = Date.now();
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    trace('cdp.connect_attempt', { attempt: attempt + 1, max: MAX_RETRIES });
     try {
       const target = await findChartTarget();
       if (!target) {
@@ -136,6 +138,12 @@ export async function connect() {
 
       lastPingMs = Date.now();
       startWatchdog();
+      trace('cdp.connect_ok', {
+        target_id: target.id,
+        target_url: target.url,
+        attempt: attempt + 1,
+        dur_ms: +(Date.now() - t0).toFixed(2),
+      });
       return client;
     } catch (err) {
       lastError = err;
@@ -143,6 +151,17 @@ export async function connect() {
       await new Promise(r => setTimeout(r, delay));
     }
   }
+  trace('cdp.connect_failed', {
+    attempts: MAX_RETRIES,
+    dur_ms: +(Date.now() - t0).toFixed(2),
+    error: String(lastError?.message || lastError || 'unknown').slice(0, 200),
+  });
+  // Critical path — about to throw. A parent process (e.g. AURUM's
+  // Python MCP client with a ~15s tool-call timeout) may SIGKILL this
+  // subprocess the moment we throw, before the fire-and-forget
+  // appendFile chain settles. Await drain() to guarantee the
+  // cdp.connect_failed event reaches disk first.
+  await trace.drain();
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 

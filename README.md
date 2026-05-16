@@ -318,6 +318,8 @@ tail -F /tmp/mcp-trace.log | jq -r 'select(.kind=="evaluateWrite.acquired") | "w
 
 Full activation guide, NDJSON schema, env-var reference, multi-process safety notes, and jq analysis recipes: **[docs/TRACING.md](docs/TRACING.md)**.
 
+For an end-to-end live test that uses the tracer to validate CDP reconnect behavior (stop TradingView → capture failure events → restart → capture success events), including extracted shell scripts portable across deployments: **[docs/RECONNECT_TESTING.md](docs/RECONNECT_TESTING.md)**.
+
 ---
 
 ## Architecture
