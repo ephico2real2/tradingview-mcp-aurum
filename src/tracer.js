@@ -175,6 +175,13 @@ function emit(line) {
     // promise settles, so SIGKILL after the chain link resolves is safe
     // (the kernel flushes its page cache asynchronously regardless of
     // whether our process is alive).
+    //
+    // We return the queue Promise so callers about to throw / exit can
+    // `await trace(...)` and guarantee the event reaches disk before
+    // their process is torn down. Most callers ignore the return value
+    // (fire-and-forget); critical paths (e.g. connect() retry exhaustion
+    // about to throw, where a parent process may SIGKILL on timeout)
+    // await it.
     _writeQueue = _writeQueue.then(() =>
       appendFile(config().file, line).catch((e) => {
         if (process.env.MCP_TRACE_DEBUG)
@@ -185,17 +192,24 @@ function emit(line) {
     // writes.
     _writeQueue = _writeQueue.then(() => maybeRotate());
     hookExit();
-    return;
+    return _writeQueue;
   }
   // Buffered mode (operator opted in via MCP_TRACE_BUFFER_MS > 0).
   _buffer.push(line);
   _bufferBytes += line.length;
   if (_bufferBytes >= BUFFER_BYTES_MAX) {
-    flush();
-  } else {
-    scheduleFlush();
+    const p = flush();
+    hookExit();
+    return p;
   }
+  scheduleFlush();
   hookExit();
+  // Buffered mode: nothing in-flight yet. Return the current queue
+  // (which is whatever flush()/scheduleFlush() drains into) as a
+  // best-effort await. Awaiting an unfired buffer yields immediately —
+  // operator should use trace.drain() if they want a synchronous flush
+  // guarantee in buffered mode.
+  return Promise.resolve();
 }
 
 function hookExit() {
@@ -245,7 +259,7 @@ function shouldSample() {
 //   logs a single one-shot event. Mostly used internally for tests.
 
 function logOne(kind, info) {
-  if (!config().enabled) return;
+  if (!config().enabled) return Promise.resolve();
   const line =
     JSON.stringify({
       ts: new Date().toISOString(),
@@ -254,7 +268,7 @@ function logOne(kind, info) {
       kind,
       ...info,
     }) + "\n";
-  emit(line);
+  return emit(line);
 }
 
 export const trace = Object.assign(logOne, {
@@ -371,6 +385,26 @@ export const trace = Object.assign(logOne, {
         });
       },
     };
+  },
+
+  /**
+   * Wait until all currently-queued trace events have been written to
+   * disk. Used by critical paths that are about to throw or exit and
+   * want to guarantee the last event reaches disk before a parent
+   * process SIGKILLs them.
+   *
+   * Immediate mode (bufferMs=0): awaits the chained appendFile queue.
+   * Buffered mode (bufferMs>0): forces a flush and awaits it.
+   *
+   * Safe to call when tracer is disabled — resolves immediately.
+   */
+  async drain() {
+    if (!config().enabled) return;
+    if (config().bufferMs === 0) {
+      await _writeQueue;
+    } else {
+      await flush();
+    }
   },
 
   /** Internal: force-flush pending buffer (used by tests). */
