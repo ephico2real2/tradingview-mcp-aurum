@@ -18,6 +18,11 @@ export function registerHealthTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('tv_cdp_status', 'Snapshot of the live CDP connection state (no roundtrip): connected, target_id, last_ping_ms_ago, reconnect_count, watchdog status. For a true roundtrip-validated check use tv_health_check.', {}, async () => {
+    try { return jsonResult(core.cdpStatus()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('tv_launch', 'Launch TradingView Desktop with Chrome DevTools Protocol (remote debugging) enabled. Auto-detects install location on Mac, Windows, and Linux.', {
     port: z.coerce.number().optional().describe('CDP port (default 9222)'),
     kill_existing: z.coerce.boolean().optional().describe('Kill existing TradingView instances first (default true)'),

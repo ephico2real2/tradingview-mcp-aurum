@@ -1,9 +1,21 @@
 /**
  * Core health/discovery/launch logic.
  */
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { getClient, getTargetInfo, evaluate, getConnectionStatus } from '../connection.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
+
+/**
+ * Return a snapshot of the live CDP connection state — no CDP roundtrip,
+ * purely in-memory. Useful for /api/health probes that want to know "is
+ * the MCP currently attached to Chrome?" without paying for an evaluate.
+ *
+ * For a roundtrip-validated check (actually evaluates `1` on the page),
+ * use tv_health_check instead.
+ */
+export function cdpStatus() {
+  return { success: true, ...getConnectionStatus() };
+}
 
 export async function healthCheck() {
   await getClient();
