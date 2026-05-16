@@ -24,6 +24,10 @@ Built on top of the original [tradingview-mcp](https://github.com/tradesdontlie/
 | `rules.json` | Write your trading rules once — bias criteria, risk rules, watchlist. The morning brief applies them automatically every day |
 | Launch bug fix | Fixed `tv_launch` compatibility with TradingView Desktop v2.14+ |
 | `tv brief` CLI | Run your morning brief from the terminal in one word |
+| **Write-tool mutex (F2)** | Serializes write-class tool calls across consumers — prevents Chrome-side state races. Default-on, zero cost when only one consumer. See `docs/TRACING.md`. |
+| **Tracer + drain()** | Optional NDJSON tracer (`MCP_TRACE_FILE`) emits per-call events for latency profiling, mutex visibility, CDP lifecycle. `trace.drain()` for SIGKILL-safe flushes. Off by default. |
+| **CDP reconnect hardening (F4)** | Auto-reconnects on Chrome disconnect via a watchdog. New `tv_cdp_status` tool returns connection state. Tracer kinds: `cdp.connect_attempt/ok/failed`, `cdp.disconnected`, `cdp.reconnect_*`. See `docs/RECONNECT_TESTING.md`. |
+| **Streamable HTTP transport (F3)** | Run the MCP as a single long-lived HTTP service for N consumers — set `MCP_TRANSPORT=http`. Default port `127.0.0.1:8765/mcp`, health probe at `/health`. The write mutex now covers ALL callers (eliminates the cross-process race that the stdio-per-consumer pattern can still hit). See `docs/TRACING.md` § "Streamable HTTP transport". |
 
 ---
 
