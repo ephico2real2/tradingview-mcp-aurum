@@ -47,6 +47,47 @@ Tracing-adjacent: these knobs control the connection / reconnect behavior the tr
 | `CDP_BASE_DELAY_MS` | `500` | Initial delay before retry 2; subsequent retries use exponential backoff (`BASE × 2^attempt`, capped at 30s). Total wall-clock for 5 retries with default = ~15.5s. |
 | `CDP_WATCHDOG_INTERVAL_MS` | `30000` | Period of the background ping that detects dead connections. Set to `0` to disable. Set to a small value (e.g. `5000`) when debugging reconnect behavior. |
 
+### Streamable HTTP transport (F3)
+
+Switch the MCP server from the default stdio transport to Streamable HTTP, serving N consumers from a single process (per MCP spec [2025-11-25/basic/transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | Set to `http` to switch the server to Streamable HTTP transport. Any other value (including unset) keeps the legacy stdio behavior unchanged. |
+| `MCP_HTTP_HOST` | `127.0.0.1` | Bind address for the HTTP listener. Default is localhost-only (no external exposure). Change to `0.0.0.0` only if you understand the security implications. |
+| `MCP_HTTP_PORT` | `8765` | TCP port for the HTTP listener. |
+| `MCP_HTTP_PATH` | `/mcp` | URL path for the MCP endpoint. The server also exposes `/health` regardless of this setting. |
+| `MCP_HTTP_MAX_BODY` | `4194304` (4 MB) | Max bytes accepted per request body. Requests exceeding this are dropped to prevent memory exhaustion. |
+
+Quick start:
+
+```bash
+MCP_TRANSPORT=http node src/server.js
+# Stderr:
+#   ⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.
+#      Streamable HTTP transport listening at http://127.0.0.1:8765/mcp
+#      Health: http://127.0.0.1:8765/health
+
+# Probe health:
+curl -s http://127.0.0.1:8765/health
+#   {"status":"ok","transport":"http","active_sessions":0,"uptime_sec":1.05}
+
+# Initialize a session:
+curl -s -X POST http://127.0.0.1:8765/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}'
+#   Response includes Mcp-Session-Id header. Reuse it on subsequent requests.
+```
+
+Combine with the tracer to observe session lifecycle:
+
+```bash
+MCP_TRACE_FILE=/tmp/mcp-trace.log MCP_TRANSPORT=http node src/server.js
+# Watch sessions live:
+tail -F /tmp/mcp-trace.log | jq -r 'select(.kind | startswith("mcp.http")) | [.ts[11:23], .kind, .sid // "", .active_sessions // ""] | @tsv'
+```
+
 ## Output schema (NDJSON)
 
 Each line is one JSON object terminated by `\n`. Multi-process safe: POSIX `write()` calls under PIPE_BUF (4KB) are atomic, and lines stay well under that. Multiple MCP subprocesses appending to the same file interleave cleanly at line granularity.
@@ -89,6 +130,9 @@ Event kinds:
 | `cdp.reconnect_attempt` | watchdog | The CDP_WATCHDOG_INTERVAL_MS ticker detected a dead client (ping failed or `client === null`) and is about to retry. Fields: `reason` (the ping error message or `"no_client"`). |
 | `cdp.reconnect_ok` | watchdog | Watchdog-initiated `connect()` succeeded. Fields: `reason`, `dur_ms`, `reconnect_count` (monotonic, increments per success). |
 | `cdp.reconnect_failed` | watchdog | Watchdog-initiated `connect()` threw — the next tick will retry. Fields: `reason`, `dur_ms`, `error`. |
+| `mcp.http.session_start` | `StreamableHTTPServerTransport` (F3) | A new HTTP session initialized via POST /mcp + initialize JSON-RPC. Fields: `sid` (UUID), `active_sessions` (count post-increment). Only emits when `MCP_TRANSPORT=http`. |
+| `mcp.http.session_end` | `StreamableHTTPServerTransport` (F3) | An HTTP session closed (explicit DELETE /mcp, transport close, or client disconnect). Fields: `sid`, `active_sessions` (count post-decrement). |
+| `mcp.http.error` | HTTP request handler (F3) | A request handler threw — caller receives 500 with JSON-RPC error envelope. Fields: `error` (truncated 200 char). |
 
 ## Sample analysis (jq)
 
