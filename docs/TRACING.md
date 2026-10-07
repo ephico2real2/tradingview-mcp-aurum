@@ -6,6 +6,7 @@ Optional NDJSON trace of every CDP `evaluate()` and `evaluateWrite()` call insid
 - **Latency profiling** — measure tool-call distributions over time without bolting on an APM.
 - **Mutex visibility** — when the write-tool mutex queues calls, the trace exposes `wait_ms` (queue latency) and `work_ms` (critical-section duration) per call.
 - **Operational forensics** — after an incident, replay exactly which Chrome calls fired and in what order.
+- **Reconnect validation** — see [`RECONNECT_TESTING.md`](./RECONNECT_TESTING.md) for an end-to-end procedure that uses the tracer to validate the CDP reconnect path (stop TV → capture failure events → restart TV → capture success events).
 
 The tracer is implemented in [`src/tracer.js`](../src/tracer.js). It is **off by default and zero-cost when off** — `evaluate()` / `evaluateWrite()` skip the trace branch in a single `if`. Tests live at [`tests/tracer.test.js`](../tests/tracer.test.js).
 
@@ -33,6 +34,18 @@ When deployed as a launchd / systemd service, add to the service's environment b
 | `MCP_TRACE_BUFFER_MS` | `50` | Internal flush interval (ms). Events are buffered in memory and flushed on this timer or when the buffer hits 64KB, whichever comes first. Plus a final flush on `process.beforeExit`. |
 | `MCP_TRACE_SAMPLE` | `1.0` | Probabilistic sampling fraction `[0, 1]`. Set to `0.1` in high-volume production to cap trace volume. Sampling decision is per-span at start, so partial spans never appear. |
 | `MCP_TRACE_DEBUG` | unset | When set, trace internal errors (disk full, rotation failure) print to stderr instead of being swallowed silently. |
+
+### CDP connection knobs
+
+Tracing-adjacent: these knobs control the connection / reconnect behavior the tracer reports on. Defaults are fine for normal use — change them when running multiple TradingView instances, debugging with a non-default CDP port, or stress-testing the retry path.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CDP_HOST` | `localhost` | Hostname/IP for the Chrome DevTools Protocol listener. |
+| `CDP_PORT` | `9222` | TCP port for CDP. Must match TradingView's `--remote-debugging-port`. |
+| `CDP_MAX_RETRIES` | `5` | How many attempts `connect()` makes before throwing. Emits one `cdp.connect_attempt` per try; on exhaustion emits `cdp.connect_failed`. |
+| `CDP_BASE_DELAY_MS` | `500` | Initial delay before retry 2; subsequent retries use exponential backoff (`BASE × 2^attempt`, capped at 30s). Total wall-clock for 5 retries with default = ~15.5s. |
+| `CDP_WATCHDOG_INTERVAL_MS` | `30000` | Period of the background ping that detects dead connections. Set to `0` to disable. Set to a small value (e.g. `5000`) when debugging reconnect behavior. |
 
 ## Output schema (NDJSON)
 
@@ -69,6 +82,13 @@ Event kinds:
 | `writeLock.acquired` | `withWriteLock(fn)` | Mutex granted to this section; `wait_ms` = queue latency. The inner `fn` may now issue multiple `evaluate` calls (recorded as `evaluate.*` events) atomically under the lock. |
 | `writeLock.released` | `withWriteLock(fn)` | Section finished; `work_ms` = total time the lock was held (covers all inner evaluate calls + sleeps + JS work) |
 | `writeLock.error` | `withWriteLock(fn)` | Inner section threw |
+| `cdp.connect_attempt` | `connect()` | One attempt to (re)establish the CDP attachment. Fields: `attempt` (1-indexed), `max` (= `CDP_MAX_RETRIES`). Emitted before each `findChartTarget()` + `CDP({...})` call inside the retry loop. |
+| `cdp.connect_ok` | `connect()` | CDP attachment succeeded. Fields: `target_id`, `target_url`, `attempt` (which retry won), `dur_ms` (total time across all retries that ran). |
+| `cdp.connect_failed` | `connect()` | All `CDP_MAX_RETRIES` attempts exhausted. Fields: `attempts`, `dur_ms`, `error` (truncated 200 char message from the last attempt). The throw that follows is what callers see. |
+| `cdp.disconnected` | `client.on('disconnect')` | WebSocket to Chrome closed (Chrome restart, TV close, OS sleep). Fields: `target_id`, `target_url`. Cached client + targetInfo are nulled simultaneously. |
+| `cdp.reconnect_attempt` | watchdog | The CDP_WATCHDOG_INTERVAL_MS ticker detected a dead client (ping failed or `client === null`) and is about to retry. Fields: `reason` (the ping error message or `"no_client"`). |
+| `cdp.reconnect_ok` | watchdog | Watchdog-initiated `connect()` succeeded. Fields: `reason`, `dur_ms`, `reconnect_count` (monotonic, increments per success). |
+| `cdp.reconnect_failed` | watchdog | Watchdog-initiated `connect()` threw — the next tick will retry. Fields: `reason`, `dur_ms`, `error`. |
 
 ## Sample analysis (jq)
 
@@ -117,6 +137,19 @@ tail -F "$TRACE" \
   | jq -r 'select(.kind | startswith("evaluateWrite"))
            | [.ts[11:19], .pid, .kind, .tool // "-",
               (.wait_ms // .work_ms // "" | tostring)] | @tsv'
+
+# 8) CDP connection lifecycle — every attempt, success, failure, reconnect.
+#    Useful when investigating "why did MCP fail at 12:27:46?" — the
+#    cdp.connect_failed event names the retry exhaustion explicitly.
+jq -r 'select(.kind | startswith("cdp.")) | [.ts[11:23], .pid, .kind, .attempt//.attempts//"", .dur_ms//"", .reason//"", (.error // "")[:60]] | @tsv' "$TRACE"
+
+# 9) Reconnect rate — how often did the watchdog have to recover?
+#    High counts indicate Chrome instability or laptop sleep cycles.
+jq -r 'select(.kind=="cdp.reconnect_ok") | .reconnect_count' "$TRACE" | tail -1
+
+# 10) Time to recover from each disconnect.
+#    Pairs cdp.reconnect_attempt (start) with cdp.reconnect_ok/failed (end).
+jq -r 'select(.kind=="cdp.reconnect_ok" or .kind=="cdp.reconnect_failed") | [.ts[11:23], .kind, .dur_ms, .reason] | @tsv' "$TRACE"
 ```
 
 ## Multi-process notes
